@@ -170,7 +170,7 @@ class Client:
         # save model
         if self.args.should_save_model(epoch):
             self.save_model(epoch, self.args.get_epoch_save_end_suffix())
-        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader)
+        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader, log_result=True, epoch=epoch)
         self.test_acc = test_accuracy
         self.class_diff = max(by_class_prec) - min(by_class_prec)
         self.every_class_acc = np.nan_to_num(by_class_prec)
@@ -228,7 +228,7 @@ class Client:
             self.save_model(epoch, self.args.get_epoch_save_end_suffix())
         
         # Question: what if test_loader is manipulated?
-        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader)
+        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader, log_result=True, epoch=epoch)
         self.test_acc = test_accuracy
         self.class_diff = max(by_class_prec) - min(by_class_prec)
         self.every_class_acc = np.nan_to_num(by_class_prec)
@@ -248,7 +248,7 @@ class Client:
 
         if self.args.should_save_model(epoch):
             self.save_model(epoch, self.args.get_epoch_save_end_suffix())
-        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader)
+        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader, log_result=True, epoch=epoch)
         self.test_acc = test_accuracy
         self.class_diff = max(by_class_prec) - min(by_class_prec)
         self.every_class_acc = np.nan_to_num(by_class_prec)
@@ -267,7 +267,7 @@ class Client:
         # save model
         if self.args.should_save_model(epoch):
             self.save_model(epoch, self.args.get_epoch_save_end_suffix())
-        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader)
+        test_accuracy, _, by_class_prec, _ = self.test(self.test_data_loader, log_result=True, epoch=epoch)
         self.test_acc = test_accuracy
         self.class_diff = max(by_class_prec) - min(by_class_prec)
         self.every_class_acc = np.nan_to_num(by_class_prec)
@@ -278,7 +278,7 @@ class Client:
         """
         Saves the model if necessary.
         """
-        self.args.get_logger().debug("Saving model to flat file storage. Save #{}", epoch)
+        #self.args.get_logger().debug("Saving model to flat file storage. Save #{}", epoch)
 
         if not os.path.exists(self.args.get_save_model_folder_path()):
             os.mkdir(self.args.get_save_model_folder_path())
@@ -297,43 +297,36 @@ class Client:
         Calculates the recall for each class from a confusion matrix.
         """
         return np.diagonal(confusion_mat) / np.sum(confusion_mat, axis=1)
-
-    def test(self, validation_set = None):
+    
+    def test(self, validation_set=None, log_result=False, epoch=None):
         self.net.eval()
         correct = 0
         total = 0
         targets_ = []
         pred_ = []
         loss = 0.0
-        data_loader =  self.test_data_loader if validation_set is None else validation_set
+        data_loader = self.test_data_loader if validation_set is None else validation_set
         with torch.no_grad():
             for (images, labels) in data_loader:
                 images, labels = images.to(self.device), labels.to(self.device)
-
                 outputs = self.net(images)
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
-
                 targets_.extend(labels.cpu().view_as(predicted).numpy())
                 pred_.extend(predicted.cpu().numpy())
-
                 loss += self.loss_function(outputs, labels).item()
 
         accuracy = 100 * correct / total
         confusion_mat = confusion_matrix(targets_, pred_)
-
         class_precision = self.calculate_class_precision(confusion_mat)
         class_recall = self.calculate_class_recall(confusion_mat)
 
-        self.args.get_logger().debug('Test set: Accuracy: {}/{} ({:.0f}%)'.format(correct, total, accuracy))
-        #self.args.get_logger().debug('Test set: Loss: {}'.format(loss))
-        #self.args.get_logger().debug("Classification Report:\n" + classification_report(targets_, pred_))
-        #self.args.get_logger().debug("Confusion Matrix:\n" + str(confusion_mat))
-        #self.args.get_logger().debug("Class precision: {}".format(str(class_precision)))
-        #self.args.get_logger().debug("Class recall: {}".format(str(class_recall)))
+        if log_result:
+            self.args.get_logger().info(f"[Client #{self.client_idx} Epoch {epoch}] Test Accuracy: {accuracy:.2f}% ({correct}/{total})")
 
         return accuracy, loss, class_precision, class_recall
+
 
     def poison_data(self, replacement_method):
         assert(self.mal == True and self.args.data_poison == True)

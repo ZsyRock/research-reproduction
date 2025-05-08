@@ -25,12 +25,13 @@ import math
 MODELS_PATH = "./3000_models"
 EXP_INFO_PATH = "./logs/3000.log"
 '''
-# 自动获取最新实验编号（基于已有的日志或模型文件夹）
-def find_latest_exp_idx(base=3000, limit=10000):
+def find_latest_exp_idx(base=3000, limit=10000, fallback=3000):
     for idx in reversed(range(base, limit)):
         if os.path.exists(f"logs/{idx}.log") and os.path.exists(f"{idx}_models"):
             return idx
-    raise FileNotFoundError("No valid experiment index found.")
+    print(f"[WARN] No valid experiment index found. Falling back to default experiment index {fallback}.")
+    return fallback
+
 
 LATEST_EXP_IDX = find_latest_exp_idx()
 SAVE_DIR_GS = os.path.join("figures", f"GS_{LATEST_EXP_IDX}")

@@ -1,4 +1,4 @@
-
+import sys
 from federated_learning.utils import replace_0_with_2
 from federated_learning.utils import replace_5_with_3
 from federated_learning.utils import replace_1_with_9
@@ -9,6 +9,7 @@ from federated_learning.utils import replace_0_with_9_1_with_3
 
 from federated_learning.worker_selection import RandomSelectionStrategy
 from server import run_exp
+from loguru import logger
 import os
 
 # 自动寻找一个未使用的实验编号
@@ -34,7 +35,7 @@ if __name__ == '__main__':
 if __name__ == '__main__':
     START_EXP_IDX = find_next_exp_idx()  # 自动确定编号
     NUM_EXP = 1                          # 设置你要运行几个实验
-    NUM_POISONED_WORKERS = 21           # 投毒客户端数量
+    NUM_POISONED_WORKERS = 0           # 投毒客户端数量
     REPLACEMENT_METHOD = replace_0_with_9_1_with_3  # 替换策略（投毒类型）
     KWARGS = {
         "NUM_WORKERS_PER_ROUND": 50     # 每轮选多少个客户端训练
@@ -42,3 +43,6 @@ if __name__ == '__main__':
 
     for experiment_id in range(START_EXP_IDX, START_EXP_IDX + NUM_EXP):
         run_exp(REPLACEMENT_METHOD, NUM_POISONED_WORKERS, KWARGS, RandomSelectionStrategy(), experiment_id)
+
+logger.remove()  # 移除默认 handler
+logger.add(sys.stdout, level="INFO") 
