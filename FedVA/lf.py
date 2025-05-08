@@ -9,16 +9,17 @@ from federated_learning.utils import replace_0_with_9_1_with_3
 
 from federated_learning.worker_selection import RandomSelectionStrategy
 from server import run_exp
-from loguru import logger
+from loguru import logger # 使用 loguru 记录日志，输出到标准输出
 import os
 
-# 自动寻找一个未使用的实验编号
+# 自动查找下一个未被占用的实验编号（避免覆盖现有日志和模型文件）
 def find_next_exp_idx(base=3000):
     while os.path.exists(f"logs/{base}.log") or os.path.exists(f"{base}_models"):
         base += 1
     return base
 
 '''
+原始运行方式（保留对照）
 if __name__ == '__main__':
     START_EXP_IDX = 3000
     NUM_EXP = 1
