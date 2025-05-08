@@ -32,6 +32,7 @@ DISCARD_THD = 20
 
 
 def PCA_clustering_selection(args, epoch, fig_save_dir):
+    # 把绝对路径改为动态获取。原为：MODELS_PATH = "/home/student/Documents/2 step cluster/3000_models"
     MODELS_PATH = args.get_save_model_folder_path()#add to find the model path
     param_diff = []
     worker_ids = []
