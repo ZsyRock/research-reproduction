@@ -1,0 +1,199 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import logging
+from typing import Callable, Optional
+
+import torch
+from opt_einsum import contract
+from torch.optim import Optimizer
+
+from .optimizer import (
+    DPOptimizer,
+    _check_processed_flag,
+    _generate_noise,
+    _mark_as_processed,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class DCSGDPOptimizer(DPOptimizer):
+    """
+    :class:~opacus.optimizers.optimizer.DPOptimizer that implements
+    adaptive clipping strategy
+    https://arxiv.org/pdf/1905.03871.pdf
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        *,
+        noise_multiplier: float,
+        histogram_std: float = 6.0,
+        max_grad_norm: float,
+        expected_batch_size: Optional[int],
+        loss_reduction: str = "mean",
+        generator=None,
+        secure_mode: bool = False,
+        batchsize_train: int = 256,
+        dimension: int = 11181642,
+        percentile: float = 0.3,
+        stride: float = 2.0,
+        bin_cnt: int = 20,
+    ):
+        super().__init__(
+            optimizer,
+            noise_multiplier=noise_multiplier,
+            max_grad_norm=max_grad_norm,
+            expected_batch_size=expected_batch_size,
+            loss_reduction=loss_reduction,
+            generator=generator,
+            secure_mode=secure_mode,
+        )
+        # dimension
+        # resnet18 11181642
+        # resnet34 21289802
+        # self.historgram_std = histogram_std
+        self.historgram_std = histogram_std
+        self.batchsize_train = batchsize_train
+        self.dimension = dimension
+        self.percentile = percentile
+        self.timer = 0
+        self.stride = 1.0
+        self.bin_cnt = bin_cnt
+        self.noise_multiplier = (
+            self.noise_multiplier ** (-2) - (self.historgram_std) ** (-2)
+        ) ** (-1 / 2)
+        self.sample_size = 0
+        self.unclipped_num = 0
+        self.norm_stack = []
+
+    def zero_grad(self, set_to_none: bool = False):
+        """
+        Clear gradients, self.sample_size and self.unclipped_num
+        """
+        super().zero_grad(set_to_none)
+
+        self.sample_size = 0
+        self.unclipped_num = 0
+
+    def clip_and_accumulate(self):
+
+
+        extended_grad_samples = []
+        per_sample_norms_all = []
+
+        for p in self.params:
+            _check_processed_flag(p.grad_sample)
+
+            grad_sample = self._get_flat_grad_sample(p)  # [B, D]
+            grad_sample = grad_sample.view(grad_sample.shape[0], -1)
+            B, D = grad_sample.shape
+            norms = grad_sample.norm(2, dim=1)  # [B]
+            per_sample_norms_all.append(norms)
+
+            residuals = (norms - self.max_grad_norm).clamp(min=0.0)  # [B]，如果超过C，就记录下超出的部分residual
+            r_per_dim = self.max_grad_norm / 5  # 每个残差槽最多填入 C/5
+
+            # 初始化扩展维度
+            extra_dims = torch.zeros(B, 5, device=grad_sample.device)
+            residuals_copy = residuals.clone()
+            for i in range(5):
+                fill = torch.min(residuals_copy, torch.full_like(residuals_copy, r_per_dim))
+                extra_dims[:, i] = fill
+                residuals_copy -= fill
+
+            # 拼接原始梯度和扩展维度
+            extended_grad = torch.cat([grad_sample, extra_dims], dim=1)  # [B, D+5]
+            extended_grad_samples.append(extended_grad)
+            # 记录所有样本的5个残差槽信息
+            self.residual_slots = torch.cat(
+                [ext[:, -5:] for ext in extended_grad_samples], dim=0  # [B, 5]
+            ).detach().cpu()
+
+
+
+            _mark_as_processed(p.grad_sample)
+
+        # 统一计算剪裁因子（基于拼接后的向量范数）
+        all_per_sample_norms = []
+        for ext_grad in extended_grad_samples:
+            norm = ext_grad.norm(2, dim=1)  # 包含扩展维度的范数
+            all_per_sample_norms.append(norm)
+        all_per_sample_norms = torch.cat(all_per_sample_norms, dim=0)
+        self.norm_stack.append(all_per_sample_norms.detach().cpu())
+
+        # 仅对原始梯度部分进行剪裁和累积
+        for p, ext_grad in zip(self.params, extended_grad_samples):
+            grad_part = ext_grad[:, :-5]  # [B, D]，原始梯度
+            norms = ext_grad.norm(2, dim=1)  # [B]，含扩展维度
+            clip_factors = (self.max_grad_norm / (norms + 1e-6)).clamp(max=1.0)  # [B]
+            clipped = contract("i,i...->...", clip_factors, grad_part)  # [D]
+
+            # 累积梯度
+            if p.summed_grad is not None:
+                p.summed_grad += clipped
+            else:
+                p.summed_grad = clipped
+
+
+    def add_noise(self):
+        super().add_noise()
+    def update_max_grad_norm_from_extensions(self):
+        """
+        使用扩展维度中5个槽位是否被激活，结合指数加权法调整 max_grad_norm
+        """
+        if not hasattr(self, "residual_slots"):
+            return
+
+        # [B, 5]，判断哪些槽位被使用
+        slot_use = (self.residual_slots > 0).float()  # 非零即被使用
+        slot_counts = slot_use.sum(dim=0)             # 每个槽位的使用总数 [5]
+        total_samples = slot_use.shape[0]
+
+        # 指数权重方案（槽0~4对应权重1~16）
+        slot_weights = torch.tensor([1, 2, 4, 8, 16], dtype=torch.float32)
+        weighted_sum = (slot_counts @ slot_weights).item()
+        avg_slot_score = weighted_sum / (total_samples + 1e-6)
+
+        # 以 target_score = 10.0 为中心平衡值（可调整）
+        # 根据偏离程度调整 C
+        target_score = 16.0
+        factor = 1 + 0.1 * (avg_slot_score - target_score) / target_score
+        old_C = self.max_grad_norm
+        #self.max_grad_norm *= factor #后面三行是新增的代码块，为了更加平滑
+        alpha = 0.9
+        new_c = self.max_grad_norm * factor
+        self.max_grad_norm = alpha * self.max_grad_norm + (1 - alpha) * new_c
+
+        self.max_grad_norm = max(min(self.max_grad_norm, 10.0), 0.01)
+
+        logger.info(
+            f"[DCSGDP] Adjusted max_grad_norm from {old_C:.4f} to {self.max_grad_norm:.4f} "
+            f"(Avg weighted slot score: {avg_slot_score:.2f})"
+        )
+
+        del self.residual_slots  # 清理，避免重复使用
+
+
+    def pre_step(
+        self, closure: Optional[Callable[[], float]] = None
+    ) -> Optional[float]:
+        loss = super().pre_step(closure)
+        self.update_max_grad_norm_from_extensions()
+        return loss
