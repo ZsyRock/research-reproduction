@@ -1,0 +1,17 @@
+# 忽略 Python 缓存文件
+__pycache__/
+*.pyc
+
+# 忽略模型、日志、图像输出（根据实际情况选择）
+*.model
+*.log
+figures/
+logs/
+results/
+
+# 忽略所有 backup 脚本文件
+*backup*.py
+
+# 忽略其他你不想上传的内容
+*.tmp
+*.bak
