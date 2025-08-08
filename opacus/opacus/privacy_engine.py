@@ -154,9 +154,6 @@ class PrivacyEngine:
                 secure_mode=self.secure_mode,
                 batchsize_train=kwargs.get("batchsize_train", 256),
                 dimension=kwargs.get("dimension", 11181642),
-                percentile=kwargs.get("percentile", 0.3),
-                stride=kwargs.get("stride", 1.0),
-                bin_cnt=kwargs.get("bin_cnt", 20),
             )
 
         optim_class = get_optimizer_class(

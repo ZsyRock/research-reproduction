@@ -102,6 +102,7 @@ class DCSGDPOptimizer(DPOptimizer):
             _check_processed_flag(p.grad_sample)
 
             grad_sample = self._get_flat_grad_sample(p)  # [B, D]
+            #print(f"[DEBUG] grad_sample shape: {grad_sample.shape}")  # 应该是 (B, D)
             grad_sample = grad_sample.view(grad_sample.shape[0], -1)
             B, D = grad_sample.shape
             norms = grad_sample.norm(2, dim=1)  # [B]
@@ -154,41 +155,58 @@ class DCSGDPOptimizer(DPOptimizer):
 
     def add_noise(self):
         super().add_noise()
+
+    def set_epoch(self, epoch):  # 加在 DCSGDPOptimizer 类中
+        self.current_epoch = epoch
+
     def update_max_grad_norm_from_extensions(self):
-        """
-        使用扩展维度中5个槽位是否被激活，结合指数加权法调整 max_grad_norm
-        """
+        print(f"[DCSGDP] Updated C to {self.max_grad_norm:.4f}")
+
         if not hasattr(self, "residual_slots"):
             return
 
-        # [B, 5]，判断哪些槽位被使用
-        slot_use = (self.residual_slots > 0).float()  # 非零即被使用
-        slot_counts = slot_use.sum(dim=0)             # 每个槽位的使用总数 [5]
+        # Step 1: 分析 residual_slots
+        slot_use = (self.residual_slots > 0).float()
+        slot_counts = slot_use.sum(dim=0)
         total_samples = slot_use.shape[0]
-
-        # 指数权重方案（槽0~4对应权重1~16）
-        slot_weights = torch.tensor([1, 2, 4, 8, 16], dtype=torch.float32)
+        slot_weights = torch.tensor([1, 4, 9, 16, 25], dtype=torch.float32)
         weighted_sum = (slot_counts @ slot_weights).item()
         avg_slot_score = weighted_sum / (total_samples + 1e-6)
 
-        # 以 target_score = 10.0 为中心平衡值（可调整）
-        # 根据偏离程度调整 C
-        target_score = 16.0
-        factor = 1 + 0.1 * (avg_slot_score - target_score) / target_score
+        # Step 2: 动态确定 target_score（你可以微调 base 值）
+        base_target = 10.0
+        if hasattr(self, "current_epoch") and self.current_epoch < 5:
+            target_score = base_target * 2.0  # 前期允许更激进
+        else:
+            target_score = base_target
+
+        # Step 3: 动态 factor 调整，响应更敏感
+        delta = (avg_slot_score - target_score) / (target_score + 1e-6)
+        factor = 1 + 0.3 * delta  # 比例变大，更敏感
+
+        # Step 4: 前期更激进，后期更平滑
+        if hasattr(self, "current_epoch") and self.current_epoch < 5:
+            alpha = 0.3
+        else:
+            alpha = 0.9
+
+        # Step 5: 更新 C 值
         old_C = self.max_grad_norm
-        #self.max_grad_norm *= factor #后面三行是新增的代码块，为了更加平滑
-        alpha = 0.9
         new_c = self.max_grad_norm * factor
         self.max_grad_norm = alpha * self.max_grad_norm + (1 - alpha) * new_c
 
+        # 限制范围
         self.max_grad_norm = max(min(self.max_grad_norm, 10.0), 0.01)
 
+        # Step 6: 日志记录
         logger.info(
-            f"[DCSGDP] Adjusted max_grad_norm from {old_C:.4f} to {self.max_grad_norm:.4f} "
-            f"(Avg weighted slot score: {avg_slot_score:.2f})"
+            f"[DCSGDP] Epoch {getattr(self, 'current_epoch', '?')}: "
+            f"Adjusted C from {old_C:.4f} → {self.max_grad_norm:.4f} "
+            f"(Avg Slot Score = {avg_slot_score:.2f}, Target = {target_score:.2f}, α = {alpha:.2f})"
         )
 
-        del self.residual_slots  # 清理，避免重复使用
+        self.current_clip = self.max_grad_norm
+        del self.residual_slots
 
 
     def pre_step(
